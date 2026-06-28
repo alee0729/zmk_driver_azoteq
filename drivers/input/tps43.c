@@ -442,7 +442,9 @@ static void tps43_handle_three_finger(const struct device *dev, uint8_t num_fing
         return; // already fired this gesture; wait for fingers to lift
     }
 
-    drv_data->tf_accum_x += rel_x;
+    // Three-finger horizontal motion is reported inverted relative to the finger
+    // direction, so subtract rel_x to keep left/right mapped to the correct codes.
+    drv_data->tf_accum_x -= rel_x;
     drv_data->tf_accum_y += rel_y;
 
     int16_t thr = (config->tf_swipe_threshold > 0) ? config->tf_swipe_threshold : 1;
