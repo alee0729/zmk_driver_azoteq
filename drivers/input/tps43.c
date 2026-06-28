@@ -20,7 +20,35 @@ LOG_MODULE_REGISTER(tps43, CONFIG_INPUT_LOG_LEVEL);
 
 /* Forward declaration: the work handler reconfigures the device on a runtime reset. */
 static int tps43_configure_device(const struct device *dev);
- 
+
+/*
+ * Dedicated trackpad workqueue.
+ *
+ * The work handler does blocking I2C and then emits input events. ZMK runs the
+ * Zephyr input subsystem in THREAD mode, so input_report_*() enqueues to a fixed
+ * (CONFIG_INPUT_QUEUE_MAX_MSGS, default 16) message queue and BLOCKS the caller
+ * when that queue is full. On a split PERIPHERAL the queue is drained by
+ * forwarding each event over rate-limited BLE, so a burst of events (e.g. a
+ * pinch-zoom or three-finger swipe) can momentarily fill it. If the handler ran
+ * on the shared system workqueue, that block would stall ALL system work and
+ * trip the watchdog -> the "crash when invoking gestures" the user sees.
+ *
+ * Running on our own workqueue confines any such transient block to the trackpad
+ * thread; it self-heals within a couple of BLE connection intervals as the queue
+ * drains, and the next RDY edge simply re-submits the (coalesced) work item.
+ */
+K_THREAD_STACK_DEFINE(tps43_workq_stack, CONFIG_INPUT_TPS43_WORKQUEUE_STACK_SIZE);
+static struct k_work_q tps43_workq;
+static bool tps43_workq_started;
+
+/* Lower priority than the input thread (priority 0) so the input thread always
+ * wins and can drain the queue while we wait; high enough not to starve BLE. */
+#define TPS43_WORKQ_PRIORITY K_PRIO_PREEMPT(10)
+
+/* Upper bound on discrete zoom steps emitted from a single report, so one pinch
+ * report can never flood the input queue with a long synchronous burst. */
+#define TPS43_MAX_ZOOM_STEPS_PER_REPORT 3
+
 /**
  * @brief Ends communication window with trackpad
  * 
@@ -203,8 +231,11 @@ static int tps43_i2c_write_reg8(const struct device *dev, uint16_t reg, uint8_t 
  */
  static void tps43_rdy_callback(const struct device *dev, struct gpio_callback *cb, uint32_t pins) {
      struct tps43_drv_data *drv_data = CONTAINER_OF(cb, struct tps43_drv_data, rdy_cb);
- 
-     k_work_submit(&drv_data->work);
+
+     // Submit to the dedicated trackpad workqueue (NOT the system workqueue): the
+     // handler can block emitting input events over the BLE split, and that block
+     // must never stall shared system work.
+     k_work_submit_to_queue(&tps43_workq, &drv_data->work);
  }
  
 
@@ -221,6 +252,32 @@ static void tps43_force_communication(const struct device *dev) {
     // Do a bogus read where we don't care about a possible NACK
     uint8_t control_reg = 0;
     tps43_i2c_read_reg8_w_err(dev, TPS43_REG_SYSTEM_CONTROL_1, &control_reg, false);
+}
+
+/**
+ * @brief Release any latched mouse button / touch contact.
+ *
+ * A press-and-hold drag latches INPUT_BTN_0 pressed, and a contact latches
+ * INPUT_BTN_TOUCH. If we ever stop processing while one of those is held — on
+ * suspend, on an I2C read failure, or on a runtime chip reset that wipes the
+ * device's gesture state — the host would be left with a stuck button (runaway
+ * selection / dead clicks), which the user perceives as a crash. Call this on
+ * every such exit path so the press always gets its matching release.
+ *
+ * @param dev Pointer to trackpad device
+ * @param drag_active Pointer to the drag-latch flag to clear (caller's copy)
+ */
+static void tps43_release_latched(const struct device *dev, bool *drag_active) {
+    struct tps43_drv_data *drv_data = dev->data;
+
+    if (drag_active != NULL && *drag_active) {
+        input_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
+        *drag_active = false;
+    }
+    if (drv_data->touching) {
+        input_report_key(dev, INPUT_BTN_TOUCH, 0, true, K_FOREVER);
+        drv_data->touching = false;
+    }
 }
 
 /**
@@ -257,14 +314,7 @@ static int tps43_set_suspend_internal(const struct device *dev, bool suspend, bo
     // mid-touch/mid-drag does not leave a mouse button stuck on the host.
     // (input_report_key performs no I2C, so it is safe even as the bus sleeps.)
     if (suspend) {
-        if (drv_data->drag_active) {
-            input_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
-            drv_data->drag_active = false;
-        }
-        if (drv_data->touching) {
-            input_report_key(dev, INPUT_BTN_TOUCH, 0, true, K_FOREVER);
-            drv_data->touching = false;
-        }
+        tps43_release_latched(dev, &drv_data->drag_active);
     }
 
     // Disable RDY interrupts when entering suspend (before any I2C operations)
@@ -376,8 +426,12 @@ static void tps43_handle_three_finger(const struct device *dev, uint8_t num_fing
     struct tps43_drv_data *drv_data = dev->data;
     const struct tps43_config *config = dev->config;
 
-    if (num_fingers != 3) {
-        // Gesture ended (lift or finger-count change): reset for next time.
+    // Treat three OR MORE fingers as the swipe regime, and only reset when the
+    // count actually drops below three. Resetting on every count change zeroed an
+    // in-progress swipe whenever a 4th finger briefly brushed the pad (num_fingers
+    // momentarily != 3), making 3-finger swipes feel unreliable.
+    if (num_fingers < 3) {
+        // Gesture ended (fingers lifted below three): reset for next time.
         drv_data->tf_accum_x = 0;
         drv_data->tf_accum_y = 0;
         drv_data->tf_swipe_latched = false;
@@ -474,6 +528,8 @@ static void tps43_work_handler(struct k_work *work) {
                                   sizeof(touch_data));
     if (ret < 0) {
         LOG_ERR("Touch data read error: %d", ret);
+        // Don't leave a drag/touch latched if we bail mid-stroke.
+        tps43_release_latched(dev, &is_drag_active);
         goto done;
     }
 
@@ -501,6 +557,9 @@ static void tps43_work_handler(struct k_work *work) {
             drv_data->device_ready = true;
             LOG_INF("Runtime reconfigure complete");
         }
+        // The reset wiped the chip's gesture state, so the matching press/hold
+        // release will never arrive — release any latched button now.
+        tps43_release_latched(dev, &is_drag_active);
         goto done;
     }
 
@@ -510,10 +569,21 @@ static void tps43_work_handler(struct k_work *work) {
         LOG_INF("Touch state changed: %s", is_touching ? "down" : "up");
         input_report_key(dev, INPUT_BTN_TOUCH, is_touching ? 1 : 0, true, K_FOREVER);
         if (!is_touching) {
-            // New stroke starts clean: drop any carried movement/zoom remainder.
+            // New stroke starts clean: drop any carried movement/scroll/zoom remainder.
             drv_data->move_rem_x = 0;
             drv_data->move_rem_y = 0;
+            drv_data->scroll_rem_x = 0;
+            drv_data->scroll_rem_y = 0;
             drv_data->zoom_accum = 0;
+            // Safety net: if a press-and-hold drag was active and the fingers
+            // lifted without a clean gesture-event release (e.g. the lift report
+            // carried no gesture bits), release the left button here so it never
+            // sticks. (Harmless if the gesture block below already released it.)
+            if (is_drag_active) {
+                LOG_INF("Touch up during drag - releasing LEFT BUTTON");
+                input_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);
+                is_drag_active = false;
+            }
         }
     }
 
@@ -567,23 +637,32 @@ static void tps43_work_handler(struct k_work *work) {
     // consumed by tps43_handle_three_finger() above and must not move the cursor.
     if ((rel_x != 0 || rel_y != 0) && num_fingers < 3) {
         if (is_scroll_active) {
-            // Scroll processing: keep only dominant axis
-            if (abs(rel_x) > abs(rel_y)) {
-                // Horizontal scroll
-                if (config->invert_scroll_x) {
-                    rel_x = -rel_x;
-                }
-                int16_t wheel = (rel_x * config->scroll_sensitivity) / 100;
-                LOG_INF("Scrolling %d horizontally", wheel);
-                input_report_rel(dev, INPUT_REL_HWHEEL, wheel, true, K_FOREVER);
-            } else {
-                // Vertical scroll
-                if (config->invert_scroll_y) {
-                    rel_y = -rel_y;
-                }
-                int16_t wheel = (rel_y * config->scroll_sensitivity) / 100;
+            // 2-finger scroll. Emit BOTH axes (fluid / diagonal, macOS-like)
+            // instead of dominant-axis-only, each with its own sub-detent
+            // remainder carry so slow scrolling accumulates smoothly instead of
+            // truncating to zero (the source of the "notchy" feel).
+            int16_t sx = config->invert_scroll_x ? -rel_x : rel_x;
+            int16_t sy = config->invert_scroll_y ? -rel_y : rel_y;
+
+            int32_t numx = (int32_t)sx * config->scroll_sensitivity + drv_data->scroll_rem_x;
+            int32_t outx = numx / 100;
+            drv_data->scroll_rem_x = numx - outx * 100;
+
+            int32_t numy = (int32_t)sy * config->scroll_sensitivity + drv_data->scroll_rem_y;
+            int32_t outy = numy / 100;
+            drv_data->scroll_rem_y = numy - outy * 100;
+
+            int16_t hwheel = (int16_t)CLAMP(outx, INT16_MIN, INT16_MAX);
+            int16_t wheel  = (int16_t)CLAMP(outy, INT16_MIN, INT16_MAX);
+
+            if (wheel != 0) {
                 LOG_INF("Scrolling %d vertically", wheel);
-                input_report_rel(dev, INPUT_REL_WHEEL, wheel, true, K_FOREVER);
+                // Sync now only if there is no horizontal component to follow.
+                input_report_rel(dev, INPUT_REL_WHEEL, wheel, hwheel == 0, K_FOREVER);
+            }
+            if (hwheel != 0) {
+                LOG_INF("Scrolling %d horizontally", hwheel);
+                input_report_rel(dev, INPUT_REL_HWHEEL, hwheel, true, K_FOREVER);
             }
             is_scroll_active = false;
         } else if (is_zoom_active) {
@@ -592,6 +671,14 @@ static void tps43_work_handler(struct k_work *work) {
             int32_t zoom_delta = ((int32_t)rel_x * config->zoom_sensitivity) / 100;
             drv_data->zoom_accum += zoom_delta;
             int16_t step = (config->zoom_step > 0) ? config->zoom_step : 1;
+
+            // Bound the burst: never emit more than a few steps from one report.
+            // Clamping the accumulator (rather than just breaking) also discards
+            // the runaway excess so it cannot resurface as a delayed burst later.
+            // This is what keeps a fast/noisy pinch from flooding the input queue.
+            int32_t cap = (int32_t)step * TPS43_MAX_ZOOM_STEPS_PER_REPORT;
+            drv_data->zoom_accum = CLAMP(drv_data->zoom_accum, -cap, cap);
+
             while (drv_data->zoom_accum >= step) {
                 LOG_INF("Zoom IN step -> code 0x%X", config->zoom_in_code);
                 tps43_tap_code(dev, config->zoom_in_code);
@@ -604,11 +691,33 @@ static void tps43_work_handler(struct k_work *work) {
             }
             is_zoom_active = false;
         } else {
-            // Normal cursor movement with sub-unit remainder accumulation so
-            // slow/fine motion is not lost to integer truncation when
-            // sensitivity < 100.
+            // Normal cursor movement. The sub-unit remainder carry (move_rem_*)
+            // preserves slow/fine motion against integer truncation. Optional
+            // macOS-like acceleration then scales the gain by how fast the finger
+            // is moving this report: slow -> finer control, fast -> more reach.
+            int32_t gain = config->sensitivity;   // % ; the flat factor when accel is off
+            if (config->pointer_acceleration) {
+                int32_t speed = abs((int)rel_x) + abs((int)rel_y);   // raw counts this report
+                int32_t lo = config->accel_slow_threshold;
+                int32_t hi = config->accel_fast_threshold;
+                int32_t g;   // speed-dependent gain, %
+                if (hi <= lo) {
+                    g = 100;   // thresholds misconfigured -> neutral
+                } else if (speed <= lo) {
+                    g = config->accel_min_gain;
+                } else if (speed >= hi) {
+                    g = config->accel_max_gain;
+                } else {
+                    // Linear interpolation between min and max gain.
+                    g = config->accel_min_gain +
+                        (config->accel_max_gain - config->accel_min_gain) *
+                        (speed - lo) / (hi - lo);
+                }
+                gain = (int32_t)config->sensitivity * g / 100;
+            }
+
             if (rel_x != 0) {
-                int32_t num = (int32_t)rel_x * config->sensitivity + drv_data->move_rem_x;
+                int32_t num = (int32_t)rel_x * gain + drv_data->move_rem_x;
                 int32_t out = num / 100;
                 drv_data->move_rem_x = num - out * 100;
                 rel_x = (int16_t)CLAMP(out, INT16_MIN, INT16_MAX);
@@ -616,7 +725,7 @@ static void tps43_work_handler(struct k_work *work) {
                 drv_data->move_rem_x = 0;
             }
             if (rel_y != 0) {
-                int32_t num = (int32_t)rel_y * config->sensitivity + drv_data->move_rem_y;
+                int32_t num = (int32_t)rel_y * gain + drv_data->move_rem_y;
                 int32_t out = num / 100;
                 drv_data->move_rem_y = num - out * 100;
                 rel_y = (int16_t)CLAMP(out, INT16_MIN, INT16_MAX);
@@ -665,6 +774,8 @@ static int tps43_reset_values(const struct device *dev) {
 
     drv_data->move_rem_x = 0;
     drv_data->move_rem_y = 0;
+    drv_data->scroll_rem_x = 0;
+    drv_data->scroll_rem_y = 0;
     drv_data->zoom_accum = 0;
     drv_data->tf_accum_x = 0;
     drv_data->tf_accum_y = 0;
@@ -750,6 +861,35 @@ static int tps43_configure_device(const struct device *dev) {
             return ret;
         }
         LOG_INF("Multi-gestures enabled: 0x%02X", multi_gestures);
+    }
+
+    // tap / hold timing (only written if set in DT). Shorter values make
+    // tap-to-click and press-and-hold drag engage faster, for a snappier feel.
+    if (config->tap_time != -1) {
+        ret = tps43_i2c_write_reg16(dev, TPS43_REG_TAP_TIME, (uint16_t)config->tap_time);
+        if (ret != 0) {
+            LOG_WRN("Tap time write error: %d", ret);
+            return ret;
+        }
+        LOG_INF("Tap time set: %u ms", (uint16_t)config->tap_time);
+    }
+
+    if (config->tap_distance != -1) {
+        ret = tps43_i2c_write_reg16(dev, TPS43_REG_TAP_DISTANCE, (uint16_t)config->tap_distance);
+        if (ret != 0) {
+            LOG_WRN("Tap distance write error: %d", ret);
+            return ret;
+        }
+        LOG_INF("Tap distance set: %u px", (uint16_t)config->tap_distance);
+    }
+
+    if (config->hold_time != -1) {
+        ret = tps43_i2c_write_reg16(dev, TPS43_REG_HOLD_TIME, (uint16_t)config->hold_time);
+        if (ret != 0) {
+            LOG_WRN("Hold time write error: %d", ret);
+            return ret;
+        }
+        LOG_INF("Hold time set: %u ms", (uint16_t)config->hold_time);
     }
 
     // filter configuration
@@ -1497,6 +1637,19 @@ static int tps43_init(const struct device *dev) {
     k_sem_init(&drv_data->lock, 1, 1);
     k_work_init(&drv_data->work, tps43_work_handler);
 
+    // Start the shared dedicated trackpad workqueue once (covers all instances).
+    // Must be running before the RDY interrupt is armed, since the ISR submits
+    // work to it. See the queue's definition for why a dedicated queue is used.
+    if (!tps43_workq_started) {
+        k_work_queue_init(&tps43_workq);
+        k_work_queue_start(&tps43_workq, tps43_workq_stack,
+                           K_THREAD_STACK_SIZEOF(tps43_workq_stack),
+                           TPS43_WORKQ_PRIORITY, NULL);
+        tps43_workq_started = true;
+        LOG_INF("Trackpad workqueue started (stack %d, prio %d)",
+                CONFIG_INPUT_TPS43_WORKQUEUE_STACK_SIZE, TPS43_WORKQ_PRIORITY);
+    }
+
     drv_data->initialized = true;
     drv_data->suspended = false;
 
@@ -1558,6 +1711,11 @@ static int tps43_init(const struct device *dev) {
         .sensitivity = DT_INST_PROP_OR(inst, sensitivity, 50),                                       \
         .scroll_sensitivity = DT_INST_PROP_OR(inst, scroll_sensitivity, 100),                        \
         .zoom_sensitivity = DT_INST_PROP_OR(inst, zoom_sensitivity, 100),                            \
+        .pointer_acceleration = DT_INST_PROP(inst, pointer_acceleration),                            \
+        .accel_min_gain = DT_INST_PROP_OR(inst, accel_min_gain, 70),                                 \
+        .accel_max_gain = DT_INST_PROP_OR(inst, accel_max_gain, 220),                                \
+        .accel_slow_threshold = DT_INST_PROP_OR(inst, accel_slow_threshold, 4),                      \
+        .accel_fast_threshold = DT_INST_PROP_OR(inst, accel_fast_threshold, 18),                     \
         .zoom_in_code = DT_INST_PROP_OR(inst, zoom_in_code, INPUT_BTN_4),                             \
         .zoom_out_code = DT_INST_PROP_OR(inst, zoom_out_code, INPUT_BTN_5),                           \
         .zoom_step = DT_INST_PROP_OR(inst, zoom_step, 30),                                            \
@@ -1583,6 +1741,9 @@ static int tps43_init(const struct device *dev) {
         .scroll_angle = DT_INST_PROP_OR(inst, scroll_angle, -1),                                     \
         .zoom_initial_distance = DT_INST_PROP_OR(inst, zoom_initial_distance, -1),                   \
         .zoom_consecutive_distance = DT_INST_PROP_OR(inst, zoom_consecutive_distance, -1),           \
+        .tap_time = DT_INST_PROP_OR(inst, tap_time, -1),                                             \
+        .tap_distance = DT_INST_PROP_OR(inst, tap_distance, -1),                                     \
+        .hold_time = DT_INST_PROP_OR(inst, hold_time, -1),                                           \
         .ati_target = DT_INST_PROP_OR(inst, ati_target, -1),                                         \
         .ref_drift_limit = DT_INST_PROP_OR(inst, ref_drift_limit, -1),                               \
         .reati_lower_limit = DT_INST_PROP_OR(inst, reati_lower_limit, -1),                           \

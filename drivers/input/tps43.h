@@ -218,6 +218,16 @@ struct tps43_config {
     int16_t scroll_sensitivity;
     int16_t zoom_sensitivity;
 
+    /* Pointer acceleration (macOS-like): a speed-dependent gain applied on top of
+       `sensitivity`. Centered so that mid-speed motion is unchanged, slow motion is
+       finer (min gain) and fast motion covers more ground (max gain). When disabled
+       the cursor is purely linear (legacy behavior). */
+    bool pointer_acceleration;
+    int16_t accel_min_gain;       /* % gain at/below the slow threshold */
+    int16_t accel_max_gain;       /* % gain at/above the fast threshold */
+    int16_t accel_slow_threshold; /* raw counts/report at/below which min gain applies */
+    int16_t accel_fast_threshold; /* raw counts/report at/above which max gain applies */
+
     /* Pinch-to-zoom output: momentary key/button codes emitted per zoom step */
     uint16_t zoom_in_code;
     uint16_t zoom_out_code;
@@ -248,6 +258,12 @@ struct tps43_config {
     int16_t scroll_angle;
     int16_t zoom_initial_distance;
     int16_t zoom_consecutive_distance;
+
+    /* Tap / hold timing (only written if set; -1 = leave device default). Shorter
+       tap-time / hold-time make tap-to-click and drag engagement feel snappier. */
+    int16_t tap_time;
+    int16_t tap_distance;
+    int16_t hold_time;
 
     int16_t ati_target;
     int16_t ref_drift_limit;
@@ -282,6 +298,10 @@ struct tps43_drv_data {
     /* Sub-unit movement remainder carried between reports (preserves fine motion) */
     int32_t move_rem_x;
     int32_t move_rem_y;
+
+    /* Sub-detent scroll remainder carried between reports (smooths 2-finger scroll) */
+    int32_t scroll_rem_x;
+    int32_t scroll_rem_y;
 
     /* Pinch-to-zoom: accumulated delta since the last emitted zoom step */
     int32_t zoom_accum;

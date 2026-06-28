@@ -8,7 +8,9 @@ This driver should work with any IQS5XX-based trackpad (TPS43 or TPS65).
 
 ## Features
 
-- Trackpad movement.
+- Trackpad movement, with optional macOS-like **pointer acceleration** (`pointer-acceleration`): cursor gain scales with finger speed (slow = fine control, fast = more reach). Disabled by default (purely linear) for backward compatibility.
+- Smooth 2-finger scrolling: both axes are emitted (fluid/diagonal) with a per-axis sub-detent remainder carry, so slow scrolling accumulates instead of truncating to a notchy stop.
+- Robust event delivery: the driver runs on its own dedicated workqueue, so a transient back-pressure on the input event queue (e.g. forwarding a gesture burst over a BLE split) can never stall system-wide work. Gesture bursts (zoom) are also bounded per report. Latched buttons/drags are always released on suspend, I2C errors, and chip resets so a mouse button is never left stuck.
 - Touch reporting: finger contact is reported as `INPUT_BTN_TOUCH` (1 when one or more fingers are on the pad, 0 when all fingers are lifted).
 - Single tap: registered as left click.
 - Two-finger tap: registered as right click.
@@ -54,6 +56,21 @@ CONFIG_INPUT_TPS43=y
                                           For a bigger change, also lower x-resolution/y-resolution below. */
         scroll-sensitivity = <50>;     /* 50% = normal state */
         zoom-sensitivity = <50>;       /* 50% = normal state */
+
+        /* Optional macOS-like pointer acceleration (gain scales with finger speed). */
+        // pointer-acceleration;
+        // accel-min-gain = <60>;         /* % gain at/below the slow threshold (fine control) */
+        // accel-max-gain = <240>;        /* % gain at/above the fast threshold (fast flicks) */
+        // accel-slow-threshold = <3>;    /* per-report raw speed |dx|+|dy| for min gain */
+        // accel-fast-threshold = <20>;   /* per-report raw speed |dx|+|dy| for max gain */
+
+        /* Report rate (ms): a fast active rate is the biggest smoothness lever. */
+        // report-rate-active = <10>;        /* 100 Hz while tracking */
+        // report-rate-idle-touch = <16>;    /* resting-finger rate */
+
+        /* Tap / hold timing (ms): shorter = snappier click and faster drag engage. */
+        // tap-time = <180>;
+        // hold-time = <300>;
 
         filter-settings=<0x0B>;        /* See filter description in `available settings` */
         // filter-dynamic-bottom=<7>;     /* Dynamic filter bottom beta (optional) */

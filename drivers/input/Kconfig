@@ -15,4 +15,13 @@ config INPUT_TPS43_INIT_PRIORITY
     help
       Device driver initialization priority.
 
+config INPUT_TPS43_WORKQUEUE_STACK_SIZE
+    int "Trackpad workqueue stack size"
+    default 2048
+    help
+      Stack size (bytes) for the dedicated workqueue that processes trackpad
+      reads and emits input events. A dedicated queue (instead of the shared
+      system workqueue) ensures that blocking on a full input event queue
+      while forwarding events over a BLE split never stalls system-wide work.
+
 endif # ZMK_SENSOR_TPS43

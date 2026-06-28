@@ -96,6 +96,52 @@ properties:
     default: 100
     description: Zoom sensitivity percentage (100 = normal, higher = more sensitive)
 
+  pointer-acceleration:
+    type: boolean
+    required: false
+    description: |
+      Enable macOS-like pointer acceleration. When set, the cursor gain depends
+      on finger speed (per report): slow motion uses accel-min-gain for fine
+      control, fast motion uses accel-max-gain to cover more ground, with a
+      linear ramp in between. Applied on top of `sensitivity`. When unset, the
+      cursor is purely linear (legacy behavior).
+
+  accel-min-gain:
+    type: int
+    required: false
+    default: 70
+    description: |
+      Gain percentage at/below accel-slow-threshold when pointer-acceleration is
+      enabled (lower = finer slow-speed control). Applied as a multiplier on
+      `sensitivity` (i.e. effective = sensitivity * gain / 100).
+
+  accel-max-gain:
+    type: int
+    required: false
+    default: 220
+    description: |
+      Gain percentage at/above accel-fast-threshold when pointer-acceleration is
+      enabled (higher = faster flick-to-edge). Applied as a multiplier on
+      `sensitivity`.
+
+  accel-slow-threshold:
+    type: int
+    required: false
+    default: 4
+    description: |
+      Per-report finger speed (raw counts, |dx|+|dy|) at/below which accel-min-gain
+      applies. Only used when pointer-acceleration is enabled.
+
+  accel-fast-threshold:
+    type: int
+    required: false
+    default: 18
+    description: |
+      Per-report finger speed (raw counts, |dx|+|dy|) at/above which accel-max-gain
+      applies. Between the slow and fast thresholds the gain ramps linearly. Must
+      be greater than accel-slow-threshold (otherwise acceleration is neutralized).
+      Only used when pointer-acceleration is enabled.
+
   zoom-in-code:
     type: int
     required: false
@@ -307,6 +353,29 @@ properties:
       Sets the distance threshold for consecutive zoom segments.
       Written to the ZOOM_CONSECUTIVE_DISTANCE register (0x06CD).
       Only written if explicitly set.
+
+  tap-time:
+    type: int
+    required: false
+    description: |
+      Maximum time in milliseconds a finger may be down to register as a tap.
+      Written to the TAP_TIME register (0x06B9). Shorter = snappier tap-to-click.
+      Only written if explicitly set.
+
+  tap-distance:
+    type: int
+    required: false
+    description: |
+      Maximum finger travel in pixels allowed during a tap before it is rejected.
+      Written to the TAP_DISTANCE register (0x06BB). Only written if explicitly set.
+
+  hold-time:
+    type: int
+    required: false
+    description: |
+      Time in milliseconds a finger must be held (within tap-distance) to trigger
+      press-and-hold (drag). Written to the HOLD_TIME register (0x06BD). Shorter =
+      drag engages faster. Only written if explicitly set.
 
   ati-target:
     type: int
