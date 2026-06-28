@@ -8,14 +8,17 @@ This driver should work with any IQS5XX-based trackpad (TPS43 or TPS65).
 
 ## Features
 
-- Trackpad movement.
+- Trackpad movement, with optional macOS-like **pointer acceleration** (`pointer-acceleration`): cursor gain scales with finger speed (slow = fine control, fast = more reach). Disabled by default (purely linear) for backward compatibility.
+- Smooth 2-finger scrolling: both axes are emitted (fluid/diagonal) with a per-axis sub-detent remainder carry, so slow scrolling accumulates instead of truncating to a notchy stop.
+- Robust event delivery: the driver runs on its own dedicated workqueue, so a transient back-pressure on the input event queue (e.g. forwarding a gesture burst over a BLE split) can never stall system-wide work. Gesture bursts (zoom) are also bounded per report. Latched buttons/drags are always released on suspend, I2C errors, and chip resets so a mouse button is never left stuck.
 - Touch reporting: finger contact is reported as `INPUT_BTN_TOUCH` (1 when one or more fingers are on the pad, 0 when all fingers are lifted).
 - Single tap: registered as left click.
 - Two-finger tap: registered as right click.
 - Press and hold: registered as continuous left click (drag).
 - Vertical and horizontal scrolling - Modern 'gesture based' two finger swiping
-- Left/right/up/down swipe send INPUT_BTN_WEST/EAST/NORTH/SOUTH events.  You can map them to other keys/actions as you wish in your dts file. (Either 3-finger or 1-finger directional swiping is supported)
-- Pinch-to-zoom (reported as movement on the INPUT_REL_MISC 'wheel' - you can add dts rules to map this to something your apps can understand)
+- 1-finger left/right/up/down swipes send INPUT_BTN_WEST/EAST/NORTH/SOUTH events.  You can map them to other keys/actions as you wish in your dts file.
+- 3-finger swipes (all four directions) are detected separately - latched and threshold-based, so each swipe fires exactly once - and send their own distinct, configurable codes (defaults INPUT_BTN_6/7/8/9 for up/down/left/right). Because they differ from the 1-finger swipe codes, the host can tell them apart. Tune with `three-finger-swipe-threshold`.
+- Pinch-to-zoom sends distinct, configurable momentary codes for zoom-in (pinch-out) vs zoom-out (pinch-in), defaults INPUT_BTN_4 / INPUT_BTN_5, stepped via `zoom-step` so it does not flood events. Map them in your ZMK config (for example to Ctrl+= / Ctrl+-).
 
 ## Usage
 
@@ -48,9 +51,26 @@ CONFIG_INPUT_TPS43=y
 
         enable-power-management;
         
-        sensitivity = <100>;           /* 100% = normal state */
+        sensitivity = <50>;            /* 50% of raw sensor speed (driver default). Lower = slower cursor.
+                                          Sub-unit remainder is carried between reports so slow moves still register.
+                                          For a bigger change, also lower x-resolution/y-resolution below. */
         scroll-sensitivity = <50>;     /* 50% = normal state */
         zoom-sensitivity = <50>;       /* 50% = normal state */
+
+        /* Optional macOS-like pointer acceleration (gain scales with finger speed). */
+        // pointer-acceleration;
+        // accel-min-gain = <60>;         /* % gain at/below the slow threshold (fine control) */
+        // accel-max-gain = <240>;        /* % gain at/above the fast threshold (fast flicks) */
+        // accel-slow-threshold = <3>;    /* per-report raw speed |dx|+|dy| for min gain */
+        // accel-fast-threshold = <20>;   /* per-report raw speed |dx|+|dy| for max gain */
+
+        /* Report rate (ms): a fast active rate is the biggest smoothness lever. */
+        // report-rate-active = <10>;        /* 100 Hz while tracking */
+        // report-rate-idle-touch = <16>;    /* resting-finger rate */
+
+        /* Tap / hold timing (ms): shorter = snappier click and faster drag engage. */
+        // tap-time = <180>;
+        // hold-time = <300>;
 
         filter-settings=<0x0B>;        /* See filter description in `available settings` */
         // filter-dynamic-bottom=<7>;     /* Dynamic filter bottom beta (optional) */
@@ -68,6 +88,17 @@ CONFIG_INPUT_TPS43=y
         // scroll-angle=<30>;                     /* Max scroll angle in degrees (optional) */
         // zoom-initial-distance=<100>;           /* Zoom initial distance in px (optional) */
         // zoom-consecutive-distance=<50>;        /* Zoom consecutive distance in px (optional) */
+
+        /* Gesture output codes (optional - defaults shown). Map these in your ZMK config.
+           To use the INPUT_BTN_* names, #include <zephyr/dt-bindings/input/input-event-codes.h>. */
+        // zoom-in-code=<INPUT_BTN_4>;            /* pinch-out (zoom in) */
+        // zoom-out-code=<INPUT_BTN_5>;           /* pinch-in (zoom out) */
+        // zoom-step=<30>;                        /* accumulated magnitude per zoom event */
+        // three-finger-swipe-up-code=<INPUT_BTN_6>;
+        // three-finger-swipe-down-code=<INPUT_BTN_7>;
+        // three-finger-swipe-left-code=<INPUT_BTN_8>;
+        // three-finger-swipe-right-code=<INPUT_BTN_9>;
+        // three-finger-swipe-threshold=<150>;    /* travel (raw units) to fire a 3-finger swipe */
 
         scroll;
         two-finger-tap;
