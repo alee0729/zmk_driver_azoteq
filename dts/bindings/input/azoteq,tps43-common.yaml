@@ -76,8 +76,13 @@ properties:
   sensitivity:
     type: int
     required: false
-    default: 100
-    description: Touch sensitivity percentage (100 = normal, higher = more sensitive)
+    default: 50
+    description: |
+      Cursor sensitivity percentage (100 = raw sensor speed, lower = slower,
+      higher = faster). The driver carries the sub-unit rounding remainder
+      between reports, so values below 100 still register slow/fine movements.
+      For larger changes, also lower x-resolution / y-resolution (the coarse,
+      hardware-level knob).
 
   scroll-sensitivity:
     type: int
@@ -90,6 +95,30 @@ properties:
     required: false
     default: 100
     description: Zoom sensitivity percentage (100 = normal, higher = more sensitive)
+
+  zoom-in-code:
+    type: int
+    required: false
+    description: |
+      Input KEY/BTN code emitted (momentary press+release) once per zoom step
+      on a zoom-in (pinch-out) gesture. Map it in your ZMK config (e.g. to
+      Ctrl+=). Defaults to INPUT_BTN_4. Requires the `zoom` gesture enabled.
+
+  zoom-out-code:
+    type: int
+    required: false
+    description: |
+      Input KEY/BTN code emitted (momentary press+release) once per zoom step
+      on a zoom-out (pinch-in) gesture. Map it in your ZMK config (e.g. to
+      Ctrl+-). Defaults to INPUT_BTN_5. Requires the `zoom` gesture enabled.
+
+  zoom-step:
+    type: int
+    required: false
+    description: |
+      Accumulated zoom magnitude (post zoom-sensitivity) required to emit one
+      zoom-in/zoom-out event. Larger values = fewer, coarser zoom steps.
+      Defaults to 30.
 
   enable-power-management:
     type: boolean
@@ -127,7 +156,48 @@ properties:
   swipes:
     type: boolean
     required: false
-    description: Enable swipe processing. When enabled, tracks swipes as INPUT_BTN_NORTH/SOUTH/EAST/WEST.
+    description: |
+      Enable swipe processing. 1-finger swipes report INPUT_BTN_NORTH/SOUTH/EAST/WEST.
+      3-finger swipes are detected separately (latched, threshold-based) and report
+      the distinct three-finger-swipe-*-code values below so the host can tell them
+      apart from 1-finger swipes.
+
+  three-finger-swipe-up-code:
+    type: int
+    required: false
+    description: |
+      Input KEY/BTN code emitted once when a 3-finger swipe UP crosses
+      three-finger-swipe-threshold. Distinct from 1-finger swipes. Map it in your
+      ZMK config. Defaults to INPUT_BTN_6. Requires the `swipes` gesture enabled.
+
+  three-finger-swipe-down-code:
+    type: int
+    required: false
+    description: |
+      Input KEY/BTN code for a 3-finger swipe DOWN (see three-finger-swipe-up-code).
+      Defaults to INPUT_BTN_7.
+
+  three-finger-swipe-left-code:
+    type: int
+    required: false
+    description: |
+      Input KEY/BTN code for a 3-finger swipe LEFT (see three-finger-swipe-up-code).
+      Defaults to INPUT_BTN_8.
+
+  three-finger-swipe-right-code:
+    type: int
+    required: false
+    description: |
+      Input KEY/BTN code for a 3-finger swipe RIGHT (see three-finger-swipe-up-code).
+      Defaults to INPUT_BTN_9.
+
+  three-finger-swipe-threshold:
+    type: int
+    required: false
+    description: |
+      Accumulated travel (in raw trackpad relative units) on the dominant axis
+      required to fire one 3-finger swipe. Larger values require a longer swipe.
+      Defaults to 150. Tune relative to the configured x-resolution / y-resolution.
 
   switch-xy:
     type: boolean

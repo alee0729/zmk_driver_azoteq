@@ -218,6 +218,18 @@ struct tps43_config {
     int16_t scroll_sensitivity;
     int16_t zoom_sensitivity;
 
+    /* Pinch-to-zoom output: momentary key/button codes emitted per zoom step */
+    uint16_t zoom_in_code;
+    uint16_t zoom_out_code;
+    int16_t zoom_step;
+
+    /* Three-finger swipe output: momentary key/button code per direction */
+    uint16_t tf_swipe_up_code;
+    uint16_t tf_swipe_down_code;
+    uint16_t tf_swipe_left_code;
+    uint16_t tf_swipe_right_code;
+    int16_t tf_swipe_threshold;
+
     bool enable_power_management;
     bool idle_sleep;
 
@@ -264,8 +276,20 @@ struct tps43_drv_data {
     bool device_ready;
     bool initialized;
     bool drag_active;
-    bool suspended;         
-    bool touching;          
+    bool suspended;
+    bool touching;
+
+    /* Sub-unit movement remainder carried between reports (preserves fine motion) */
+    int32_t move_rem_x;
+    int32_t move_rem_y;
+
+    /* Pinch-to-zoom: accumulated delta since the last emitted zoom step */
+    int32_t zoom_accum;
+
+    /* Three-finger swipe: travel accumulators + one-shot latch per gesture */
+    int32_t tf_accum_x;
+    int32_t tf_accum_y;
+    bool tf_swipe_latched;
 };
 
 int tps43_set_sleep(const struct device *dev, bool sleep);
