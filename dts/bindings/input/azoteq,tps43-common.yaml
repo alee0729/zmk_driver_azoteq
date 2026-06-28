@@ -76,8 +76,13 @@ properties:
   sensitivity:
     type: int
     required: false
-    default: 100
-    description: Touch sensitivity percentage (100 = normal, higher = more sensitive)
+    default: 50
+    description: |
+      Cursor sensitivity percentage (100 = raw sensor speed, lower = slower,
+      higher = faster). The driver carries the sub-unit rounding remainder
+      between reports, so values below 100 still register slow/fine movements.
+      For larger changes, also lower x-resolution / y-resolution (the coarse,
+      hardware-level knob).
 
   scroll-sensitivity:
     type: int
@@ -90,6 +95,76 @@ properties:
     required: false
     default: 100
     description: Zoom sensitivity percentage (100 = normal, higher = more sensitive)
+
+  pointer-acceleration:
+    type: boolean
+    required: false
+    description: |
+      Enable macOS-like pointer acceleration. When set, the cursor gain depends
+      on finger speed (per report): slow motion uses accel-min-gain for fine
+      control, fast motion uses accel-max-gain to cover more ground, with a
+      linear ramp in between. Applied on top of `sensitivity`. When unset, the
+      cursor is purely linear (legacy behavior).
+
+  accel-min-gain:
+    type: int
+    required: false
+    default: 70
+    description: |
+      Gain percentage at/below accel-slow-threshold when pointer-acceleration is
+      enabled (lower = finer slow-speed control). Applied as a multiplier on
+      `sensitivity` (i.e. effective = sensitivity * gain / 100).
+
+  accel-max-gain:
+    type: int
+    required: false
+    default: 220
+    description: |
+      Gain percentage at/above accel-fast-threshold when pointer-acceleration is
+      enabled (higher = faster flick-to-edge). Applied as a multiplier on
+      `sensitivity`.
+
+  accel-slow-threshold:
+    type: int
+    required: false
+    default: 4
+    description: |
+      Per-report finger speed (raw counts, |dx|+|dy|) at/below which accel-min-gain
+      applies. Only used when pointer-acceleration is enabled.
+
+  accel-fast-threshold:
+    type: int
+    required: false
+    default: 18
+    description: |
+      Per-report finger speed (raw counts, |dx|+|dy|) at/above which accel-max-gain
+      applies. Between the slow and fast thresholds the gain ramps linearly. Must
+      be greater than accel-slow-threshold (otherwise acceleration is neutralized).
+      Only used when pointer-acceleration is enabled.
+
+  zoom-in-code:
+    type: int
+    required: false
+    description: |
+      Input KEY/BTN code emitted (momentary press+release) once per zoom step
+      on a zoom-in (pinch-out) gesture. Map it in your ZMK config (e.g. to
+      Ctrl+=). Defaults to INPUT_BTN_4. Requires the `zoom` gesture enabled.
+
+  zoom-out-code:
+    type: int
+    required: false
+    description: |
+      Input KEY/BTN code emitted (momentary press+release) once per zoom step
+      on a zoom-out (pinch-in) gesture. Map it in your ZMK config (e.g. to
+      Ctrl+-). Defaults to INPUT_BTN_5. Requires the `zoom` gesture enabled.
+
+  zoom-step:
+    type: int
+    required: false
+    description: |
+      Accumulated zoom magnitude (post zoom-sensitivity) required to emit one
+      zoom-in/zoom-out event. Larger values = fewer, coarser zoom steps.
+      Defaults to 30.
 
   enable-power-management:
     type: boolean
@@ -127,7 +202,48 @@ properties:
   swipes:
     type: boolean
     required: false
-    description: Enable swipe processing. When enabled, tracks swipes as INPUT_BTN_NORTH/SOUTH/EAST/WEST.
+    description: |
+      Enable swipe processing. 1-finger swipes report INPUT_BTN_NORTH/SOUTH/EAST/WEST.
+      3-finger swipes are detected separately (latched, threshold-based) and report
+      the distinct three-finger-swipe-*-code values below so the host can tell them
+      apart from 1-finger swipes.
+
+  three-finger-swipe-up-code:
+    type: int
+    required: false
+    description: |
+      Input KEY/BTN code emitted once when a 3-finger swipe UP crosses
+      three-finger-swipe-threshold. Distinct from 1-finger swipes. Map it in your
+      ZMK config. Defaults to INPUT_BTN_6. Requires the `swipes` gesture enabled.
+
+  three-finger-swipe-down-code:
+    type: int
+    required: false
+    description: |
+      Input KEY/BTN code for a 3-finger swipe DOWN (see three-finger-swipe-up-code).
+      Defaults to INPUT_BTN_7.
+
+  three-finger-swipe-left-code:
+    type: int
+    required: false
+    description: |
+      Input KEY/BTN code for a 3-finger swipe LEFT (see three-finger-swipe-up-code).
+      Defaults to INPUT_BTN_8.
+
+  three-finger-swipe-right-code:
+    type: int
+    required: false
+    description: |
+      Input KEY/BTN code for a 3-finger swipe RIGHT (see three-finger-swipe-up-code).
+      Defaults to INPUT_BTN_9.
+
+  three-finger-swipe-threshold:
+    type: int
+    required: false
+    description: |
+      Accumulated travel (in raw trackpad relative units) on the dominant axis
+      required to fire one 3-finger swipe. Larger values require a longer swipe.
+      Defaults to 150. Tune relative to the configured x-resolution / y-resolution.
 
   switch-xy:
     type: boolean
@@ -237,6 +353,29 @@ properties:
       Sets the distance threshold for consecutive zoom segments.
       Written to the ZOOM_CONSECUTIVE_DISTANCE register (0x06CD).
       Only written if explicitly set.
+
+  tap-time:
+    type: int
+    required: false
+    description: |
+      Maximum time in milliseconds a finger may be down to register as a tap.
+      Written to the TAP_TIME register (0x06B9). Shorter = snappier tap-to-click.
+      Only written if explicitly set.
+
+  tap-distance:
+    type: int
+    required: false
+    description: |
+      Maximum finger travel in pixels allowed during a tap before it is rejected.
+      Written to the TAP_DISTANCE register (0x06BB). Only written if explicitly set.
+
+  hold-time:
+    type: int
+    required: false
+    description: |
+      Time in milliseconds a finger must be held (within tap-distance) to trigger
+      press-and-hold (drag). Written to the HOLD_TIME register (0x06BD). Shorter =
+      drag engages faster. Only written if explicitly set.
 
   ati-target:
     type: int
