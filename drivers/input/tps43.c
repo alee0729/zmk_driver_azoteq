@@ -297,8 +297,8 @@ static int tps43_set_suspend_internal(const struct device *dev, bool suspend, bo
     const struct tps43_config *config = dev->config;
     int ret = 0;
 
-    // If power management is disabled, do nothing
-    if (!config->enable_power_management) {
+    // If power management is disabled, or device is already in the desired state, do nothing
+    if (drv_data->suspended == suspend || !config->enable_power_management) {
         return 0;
     }
 
@@ -631,12 +631,6 @@ static void tps43_work_handler(struct k_work *work) {
             // set internal drag flag and press left mouse button
             is_drag_active = true;
             input_report_key(dev, INPUT_BTN_0, 1, true, K_FOREVER); 
-        }
-        if ((!(gestures_events[0] & TPS43_PRESS_AND_HOLD)) && (is_drag_active)) {
-            LOG_INF("Press and hold end detected - RELEASE (RELEASE LEFT BUTTON)");
-            // release drag flag and release left mouse button
-            is_drag_active = false;
-            input_report_key(dev, INPUT_BTN_0, 0, true, K_FOREVER);   // release + sync
         }
         if (gestures_events[1] & TPS43_SCROLL) {
             // set scroll flag for processing in tp_movement block
@@ -1060,6 +1054,37 @@ static int tps43_configure_device(const struct device *dev) {
             return ret;
         }
         LOG_INF("Zoom consecutive distance set: %u px", (uint16_t)config->zoom_consecutive_distance);
+    }
+
+    // tap/hold configuration (only if set in DT)
+    if (config->tap_time != -1) {
+        ret = tps43_i2c_write_reg16(dev, TPS43_REG_TAP_TIME,
+                                    (uint16_t)config->tap_time);
+        if (ret != 0) {
+            LOG_WRN("Tap time write error: %d", ret);
+            return ret;
+        }
+        LOG_INF("Tap time set: %u ms", (uint16_t)config->tap_time);
+    }
+
+    if (config->tap_distance != -1) {
+        ret = tps43_i2c_write_reg16(dev, TPS43_REG_TAP_DISTANCE,
+                                    (uint16_t)config->tap_distance);
+        if (ret != 0) {
+            LOG_WRN("Tap distance write error: %d", ret);
+            return ret;
+        }
+        LOG_INF("Tap distance set: %u px", (uint16_t)config->tap_distance);
+    }
+
+    if (config->hold_time != -1) {
+        ret = tps43_i2c_write_reg16(dev, TPS43_REG_HOLD_TIME,
+                                    (uint16_t)config->hold_time);
+        if (ret != 0) {
+            LOG_WRN("Hold time write error: %d", ret);
+            return ret;
+        }
+        LOG_INF("Hold time set: %u ms", (uint16_t)config->hold_time);
     }
 
     // ATI configuration (only if set in DT)
@@ -1812,6 +1837,9 @@ static int tps43_init(const struct device *dev) {
         .timeout_idle = DT_INST_PROP_OR(inst, timeout_idle, -1),                                     \
         .timeout_lp1 = DT_INST_PROP_OR(inst, timeout_lp1, -1),                                       \
         .ref_update_time = DT_INST_PROP_OR(inst, ref_update_time, -1),                               \
+        .tap_time = DT_INST_PROP_OR(inst, tap_time, -1),                                             \
+        .tap_distance = DT_INST_PROP_OR(inst, tap_distance, -1),                                     \
+        .hold_time = DT_INST_PROP_OR(inst, hold_time, -1),                                           \
     };                                                                                               \
                                                                                                      \
     DEVICE_DT_INST_DEFINE(inst, tps43_init, NULL, &tps43_##inst##_drvdata, &tps43_##inst##_config,   \
