@@ -1,11 +1,15 @@
 /**
 * @file tps43_idle_sleeper.c
 * @brief Integration of TPS43 trackpad power management with ZMK power management system
-* 
-* This module subscribes to ZMK activity state change events and automatically
-* puts the trackpad into sleep mode when the keyboard transitions to idle/sleep state,
-* which significantly reduces power consumption.
-* 
+*
+* This module subscribes to ZMK activity state change events and reduces trackpad
+* power per the device's configuration:
+* - SLEEP always fully suspends the trackpad (sensing halts, ~uA).
+* - IDLE either suspends (`idle-sleep`), slows the LP2 ALP scan so the pad keeps
+*   sensing and wakes itself on touch (`idle-scan-rate-ms`), or does nothing and
+*   leaves power to the chip's internal auto-power ladder (default).
+* - ACTIVE resumes from suspend and restores the normal scan rate.
+*
 * Works in conjunction with automatic power management in the main driver (tps43.c),
 * which monitors trackpad idle time.
 */
@@ -54,19 +58,47 @@ static int on_activity_state(const zmk_event_t *eh) {
     for (size_t i = 0; i < ARRAY_SIZE(tps43_devs); i++) {
         const struct device *dev = tps43_devs[i];
         const struct tps43_config *config = dev->config;
+        int ret = 0;
 
-        /*
-         * Sleep when fully sleeping. For the IDLE state, only sleep if the
-         * device opted in via the `idle-sleep` property; otherwise stay active.
-         * Wake up whenever the keyboard is ACTIVE.
-         */
-        bool should_sleep = (state_ev->state == ZMK_ACTIVITY_SLEEP) ||
-                            (state_ev->state == ZMK_ACTIVITY_IDLE && config->idle_sleep);
+        switch (state_ev->state) {
+        case ZMK_ACTIVITY_SLEEP:
+            // Deep sleep always fully suspends the trackpad.
+            LOG_INF("ZMK activity state change: %d -> trackpad %zu sleep",
+                    state_ev->state, i);
+            ret = tps43_set_sleep(dev, true);
+            break;
 
-        LOG_INF("ZMK activity state change: %d -> trackpad %zu %s",
-                state_ev->state, i, should_sleep ? "sleep" : "active");
+        case ZMK_ACTIVITY_IDLE:
+            /*
+             * IDLE behavior is opt-in per device: `idle-sleep` fully suspends
+             * (lowest power, but the pad can't wake itself - sensing halts);
+             * `idle-scan-rate-ms` slows the LP2 ALP scan so the pad keeps
+             * sensing and wakes itself on touch. With neither, the chip's
+             * internal auto-power ladder is the only idle mechanism.
+             */
+            if (config->idle_sleep) {
+                LOG_INF("ZMK activity state change: %d -> trackpad %zu sleep",
+                        state_ev->state, i);
+                ret = tps43_set_sleep(dev, true);
+            } else if (config->idle_scan_rate_ms != -1) {
+                LOG_INF("ZMK activity state change: %d -> trackpad %zu slow-scan idle",
+                        state_ev->state, i);
+                ret = tps43_set_idle_scan(dev, true);
+            }
+            break;
 
-        int ret = tps43_set_sleep(dev, should_sleep);
+        default: /* ZMK_ACTIVITY_ACTIVE */
+            // Resume from suspend first: a suspended chip can't take the scan
+            // rate write, so the restore below must come after the wake-up.
+            LOG_INF("ZMK activity state change: %d -> trackpad %zu active",
+                    state_ev->state, i);
+            ret = tps43_set_sleep(dev, false);
+            if (ret == 0) {
+                ret = tps43_set_idle_scan(dev, false);
+            }
+            break;
+        }
+
         if (ret != 0) {
             LOG_WRN("Trackpad power management error %zu: %d", i, ret);
         }

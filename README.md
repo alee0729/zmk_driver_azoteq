@@ -232,19 +232,21 @@ The trackpad automatically enters sleep mode when the keyboard transitions to id
 
 **How it works:**
 - The `tps43_idle_sleeper.c` module subscribes to ZMK `zmk_activity_state_changed` events
-- When ZMK transitions to `SLEEP` state, the trackpad enters sleep mode
-- When ZMK transitions to `IDLE` state, the trackpad enters sleep mode only if the `idle-sleep` property is set; otherwise it stays active
-- When returning to `ACTIVE` state, the trackpad wakes up
+- When ZMK transitions to `SLEEP` state, the trackpad is always fully suspended
+- When ZMK transitions to `IDLE` state, the behavior is chosen per device (see below)
+- When returning to `ACTIVE` state, the trackpad resumes from suspend and/or its
+  normal scan rate is restored
 
-**ZMK States:**
-- `ZMK_ACTIVITY_ACTIVE` - keyboard active, trackpad operational
-- `ZMK_ACTIVITY_IDLE` - keyboard in idle mode, trackpad in sleep only if `idle-sleep` is set
-- `ZMK_ACTIVITY_SLEEP` - keyboard in sleep mode, trackpad in sleep
+**IDLE behavior — three options:**
 
-**Important:** This mechanism only works if `enable-power-management` is enabled.
+| Configuration | On ZMK IDLE | Idle power | Wake |
+|---|---|---|---|
+| *(neither property)* | nothing; the chip's internal auto-power ladder (Active → Idle → LP1 → LP2) is the only mechanism | highest | touch, instant (≤ LP2 scan period) |
+| `idle-scan-rate-ms = <500>` | the LP2 ALP scan is slowed to the given period (ms); the pad keeps sensing | low | touch — the pad wakes itself; first touch registers within ~1 scan period |
+| `idle-sleep` | full suspend: charge transfer halts, RDY is disabled | lowest (~µA) | **other keyboard activity only** (e.g. a key press on the same half); a suspended pad cannot see touches |
 
-The optional `idle-sleep` property controls whether the IDLE state also puts the
-trackpad to sleep:
+`idle-scan-rate-ms` and `idle-sleep` are mutually exclusive (compile-time error).
+Both require `enable-power-management`.
 
 ```
 &i2c0 {
@@ -252,21 +254,30 @@ trackpad to sleep:
         compatible = "azoteq,tps43";
         /* ... */
         enable-power-management;
-        idle-sleep;   /* also sleep the trackpad while ZMK is idle */
+        idle-scan-rate-ms = <500>;  /* touch-to-wake slow scan while ZMK is idle */
+        /* OR: idle-sleep;             lowest power, but touch cannot wake it */
     };
 };
 ```
 
+**Important:** This mechanism only works if `enable-power-management` is enabled.
+
 ### Technical Details
 
-**Control register:**
-- Suspend mode is controlled via the `SYSTEM_CONTROL_1` register (0x0432)
+**Suspend (SLEEP state, and IDLE with `idle-sleep`):**
+- Controlled via the `SYSTEM_CONTROL_1` register (0x0432)
 - The `TPS43_SUSPEND` bit (BIT(0)) is set to enter suspend mode
-- In suspend mode, the trackpad consumes minimal power and does not process touches
+- In suspend mode, the trackpad consumes minimal power and does not process
+  touches; the RDY interrupt is disabled until resume
+- Waking requires another ZMK activity source (the trackpad cannot wake itself)
 
-**Wake-up:**
-- Automatic wake-up occurs when activity is detected via RDY interrupt
-- On wake-up, the trackpad automatically processes the first touch
+**Slow-scan idle (IDLE with `idle-scan-rate-ms`):**
+- The driver rewrites `REPORT_RATE_LP2` (0x0582) to the configured period on
+  IDLE and restores the normal rate (the `report-rate-lp2` value if set, else
+  the firmware default read back once at configure time) on ACTIVE
+- The RDY interrupt stays armed: the chip keeps sensing on its ALP channel and
+  wakes itself into Active mode on touch, so the first touch both registers and
+  restores full responsiveness
 
 > Without `enable-power-management`, power management is completely disabled
 
