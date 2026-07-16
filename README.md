@@ -261,7 +261,7 @@ trackpad to sleep:
 
 **Control register:**
 - Suspend mode is controlled via the `SYSTEM_CONTROL_1` register (0x0432)
-- The `TPS43_SUSPEND` bit (BIT(1)) is set to enter suspend mode
+- The `TPS43_SUSPEND` bit (BIT(0)) is set to enter suspend mode
 - In suspend mode, the trackpad consumes minimal power and does not process touches
 
 **Wake-up:**
