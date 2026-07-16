@@ -1199,7 +1199,7 @@ static int tps43_configure_device(const struct device *dev) {
             LOG_WRN("Timeout LP1 write error: %d", ret);
             return ret;
         }
-        LOG_INF("Timeout LP1 set: %u s", (uint8_t)config->timeout_lp1);
+        LOG_INF("Timeout LP1 set: %u x 20 s", (uint8_t)config->timeout_lp1);
     }
 
     if (config->ref_update_time != -1) {
@@ -1726,8 +1726,12 @@ static int tps43_init(const struct device *dev) {
         .tf_swipe_left_code = DT_INST_PROP_OR(inst, three_finger_swipe_left_code, INPUT_BTN_8),       \
         .tf_swipe_right_code = DT_INST_PROP_OR(inst, three_finger_swipe_right_code, INPUT_BTN_9),     \
         .tf_swipe_threshold = DT_INST_PROP_OR(inst, three_finger_swipe_threshold, 150),              \
-        .enable_power_management = DT_INST_PROP_OR(inst, enable_power_management, true),             \
-        .idle_sleep = DT_INST_PROP_OR(inst, idle_sleep, false),                                      \
+        /* Boolean DT properties always exist (as 0/1), so DT_INST_PROP_OR      \
+           fallbacks never apply to them. Power management is OPT-IN: nodes     \
+           must set `enable-power-management;` (and `idle-sleep;` for           \
+           suspend-on-idle), as the binding and README document. */             \
+        .enable_power_management = DT_INST_PROP(inst, enable_power_management),               \
+        .idle_sleep = DT_INST_PROP(inst, idle_sleep),                                         \
         .filter_settings = DT_INST_PROP_OR(inst, filter_settings, 0x0F),                             \
         .filter_dynamic_bottom = DT_INST_PROP_OR(inst, filter_dynamic_bottom, -1),                    \
         .filter_dynamic_lower = DT_INST_PROP_OR(inst, filter_dynamic_lower, -1),                     \
