@@ -565,6 +565,19 @@ static void tps43_work_handler(struct k_work *work) {
         goto done;
     }
 
+    // First event after slow-scan idle: restore the normal LP2 rate here - the
+    // ZMK ACTIVE listener also restores it, but this path already holds the
+    // lock with the comm window open so it can't lose the restore to a busy
+    // lock; the listener call then dedupes to a no-op.
+    if (drv_data->idle_scan_active && drv_data->normal_lp2_rate != 0) {
+        if (tps43_i2c_write_reg16(dev, TPS43_REG_REPORT_RATE_LP2,
+                                  drv_data->normal_lp2_rate) == 0) {
+            drv_data->idle_scan_active = false;
+            LOG_INF("Touch during slow-scan idle: LP2 rate restored to %u ms",
+                    drv_data->normal_lp2_rate);
+        }
+    }
+
     bool is_touching = (num_fingers > 0);
     if (is_touching != drv_data->touching) {
         drv_data->touching = is_touching;
@@ -1161,6 +1174,36 @@ static int tps43_configure_device(const struct device *dev) {
         LOG_INF("Report rate LP2 set: %u ms", (uint16_t)config->report_rate_lp2);
     }
 
+    // Slow-scan idle bookkeeping: capture the LP2 rate to restore on ACTIVE -
+    // the DT value if pinned, else read back the firmware default once.
+    struct tps43_drv_data *drv_data = dev->data;
+    if (config->report_rate_lp2 != -1) {
+        drv_data->normal_lp2_rate = (uint16_t)config->report_rate_lp2;
+    } else if (config->idle_scan_rate_ms != -1 && drv_data->normal_lp2_rate == 0) {
+        ret = tps43_i2c_read_reg16(dev, TPS43_REG_REPORT_RATE_LP2,
+                                   &drv_data->normal_lp2_rate);
+        if (ret != 0) {
+            LOG_WRN("REPORT_RATE_LP2 readback error: %d", ret);
+            return ret;
+        }
+        LOG_INF("Normal LP2 report rate captured: %u ms", drv_data->normal_lp2_rate);
+    }
+    // If the chip watchdog-reset while slow-scan idle was engaged, the writes
+    // above restored the fast rate - re-apply the slow rate so the pad doesn't
+    // silently burn power while ZMK stays IDLE. Raw register write only, safe
+    // for both callers (init: flag is false; runtime SHOW_RESET recovery: lock
+    // held and comm window open).
+    if (drv_data->idle_scan_active && config->idle_scan_rate_ms != -1) {
+        ret = tps43_i2c_write_reg16(dev, TPS43_REG_REPORT_RATE_LP2,
+                                    (uint16_t)config->idle_scan_rate_ms);
+        if (ret != 0) {
+            LOG_WRN("Idle scan-rate re-apply error: %d", ret);
+            return ret;
+        }
+        LOG_INF("Slow-scan idle rate re-applied after reconfigure: %u ms",
+                (uint16_t)config->idle_scan_rate_ms);
+    }
+
     // Timeout configuration (only if set in DT)
     if (config->timeout_active != -1) {
         ret = tps43_i2c_write_reg8(dev, TPS43_REG_TIMEOUT_ACTIVE,
@@ -1693,6 +1736,8 @@ static int tps43_init(const struct device *dev) {
         .initialized = false,                                                                        \
         .drag_active = false,                                                                        \
         .suspended = false,                                                                          \
+        .idle_scan_active = false,                                                                   \
+        .normal_lp2_rate = 0,                                                                        \
     };                                                                                               \
                                                                                                      \
     static const struct tps43_config tps43_##inst##_config = {                                       \
@@ -1732,6 +1777,7 @@ static int tps43_init(const struct device *dev) {
            suspend-on-idle), as the binding and README document. */             \
         .enable_power_management = DT_INST_PROP(inst, enable_power_management),               \
         .idle_sleep = DT_INST_PROP(inst, idle_sleep),                                         \
+        .idle_scan_rate_ms = DT_INST_PROP_OR(inst, idle_scan_rate_ms, -1),                    \
         .filter_settings = DT_INST_PROP_OR(inst, filter_settings, 0x0F),                             \
         .filter_dynamic_bottom = DT_INST_PROP_OR(inst, filter_dynamic_bottom, -1),                    \
         .filter_dynamic_lower = DT_INST_PROP_OR(inst, filter_dynamic_lower, -1),                     \
@@ -1770,7 +1816,13 @@ static int tps43_init(const struct device *dev) {
                                                                                                      \
     DEVICE_DT_INST_DEFINE(inst, tps43_init, NULL, &tps43_##inst##_drvdata, &tps43_##inst##_config,   \
                         POST_KERNEL, CONFIG_INPUT_INIT_PRIORITY, NULL);                              \
-    BUILD_ASSERT(DT_INST_REG_ADDR(inst) == TPS43_I2C_ADDR, "I2C address mismatch");
+    BUILD_ASSERT(DT_INST_REG_ADDR(inst) == TPS43_I2C_ADDR, "I2C address mismatch");                  \
+    BUILD_ASSERT(!(DT_INST_NODE_HAS_PROP(inst, idle_scan_rate_ms) &&                                 \
+                   DT_INST_PROP(inst, idle_sleep)),                                                  \
+                 "idle-scan-rate-ms and idle-sleep are mutually exclusive");                         \
+    BUILD_ASSERT(!DT_INST_NODE_HAS_PROP(inst, idle_scan_rate_ms) ||                                  \
+                     DT_INST_PROP(inst, enable_power_management),                                    \
+                 "idle-scan-rate-ms requires enable-power-management");
 
 
 DT_INST_FOREACH_STATUS_OKAY(TPS43_INIT)
@@ -1790,4 +1842,70 @@ int tps43_set_sleep(const struct device *dev, bool sleep) {
         return -EINVAL;
     }
     return tps43_set_suspend(dev, sleep);
+}
+
+/**
+ * @brief Slow-scan idle: slow or restore the chip's LP2 ALP scan rate
+ *
+ * Used by tps43_idle_sleeper on ZMK IDLE/ACTIVE transitions when the
+ * `idle-scan-rate-ms` property is set. Unlike suspend, the chip keeps
+ * sensing at the slowed rate and wakes itself on touch, so the RDY
+ * interrupt is deliberately left armed.
+ *
+ * @param dev Pointer to trackpad device
+ * @param slow true - apply the idle scan rate, false - restore the normal rate
+ * @return 0 on success, negative error code on failure
+ */
+int tps43_set_idle_scan(const struct device *dev, bool slow) {
+    if (dev == NULL) {
+        return -EINVAL;
+    }
+    struct tps43_drv_data *drv_data = dev->data;
+    const struct tps43_config *config = dev->config;
+    int ret;
+
+    if (!config->enable_power_management || config->idle_scan_rate_ms == -1) {
+        return 0;
+    }
+
+    // Bounded wait, same discipline as suspend/resume and the work handler.
+    if (k_sem_take(&drv_data->lock, K_MSEC(100)) != 0) {
+        LOG_WRN("Failed to acquire semaphore for idle scan-rate change");
+        return -EBUSY;
+    }
+
+    // A suspended chip can't take writes (suspend/resume owns that state), and
+    // repeated requests for the current state need no bus traffic. The work
+    // handler may also have restored the rate already on the wake-up touch.
+    if (drv_data->suspended || slow == drv_data->idle_scan_active) {
+        k_sem_give(&drv_data->lock);
+        return 0;
+    }
+
+    uint16_t rate = slow ? (uint16_t)config->idle_scan_rate_ms
+                         : drv_data->normal_lp2_rate;
+    if (rate == 0) {
+        // Normal rate was never captured - never write 0 to the chip.
+        LOG_WRN("No normal LP2 rate captured, skipping restore");
+        k_sem_give(&drv_data->lock);
+        return 0;
+    }
+
+    // Same comm-window pattern as tps43_set_suspend_internal; the chip may
+    // already be in a low-power mode, so force a window before writing.
+    tps43_force_communication(dev);
+    k_sleep(K_MSEC(1)); // need at least 200uS before the next transaction
+
+    ret = tps43_i2c_write_reg16(dev, TPS43_REG_REPORT_RATE_LP2, rate);
+    if (ret == 0) {
+        drv_data->idle_scan_active = slow;
+        LOG_INF("%s slow-scan idle: LP2 report rate %u ms",
+                slow ? "Entering" : "Exiting", rate);
+    } else {
+        LOG_ERR("REPORT_RATE_LP2 write error: %d", ret);
+    }
+
+    tps43_end_communication_window(dev);
+    k_sem_give(&drv_data->lock);
+    return ret;
 }

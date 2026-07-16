@@ -242,6 +242,10 @@ struct tps43_config {
 
     bool enable_power_management;
     bool idle_sleep;
+    /* Slow-scan idle: LP2 ALP scan period (ms) applied on ZMK IDLE so the pad
+       keeps sensing and wakes itself on touch; -1 = disabled. Mutually
+       exclusive with idle_sleep (enforced at build time). */
+    int16_t idle_scan_rate_ms;
 
     uint8_t filter_settings;
     int16_t filter_dynamic_bottom;
@@ -295,6 +299,12 @@ struct tps43_drv_data {
     bool suspended;
     bool touching;
 
+    /* Slow-scan idle state: whether the slowed LP2 rate is currently applied,
+       and the normal rate to restore on wake (0 = never captured; never
+       written to the chip). */
+    bool idle_scan_active;
+    uint16_t normal_lp2_rate;
+
     /* Sub-unit movement remainder carried between reports (preserves fine motion) */
     int32_t move_rem_x;
     int32_t move_rem_y;
@@ -313,6 +323,7 @@ struct tps43_drv_data {
 };
 
 int tps43_set_sleep(const struct device *dev, bool sleep);
+int tps43_set_idle_scan(const struct device *dev, bool slow);
 
 #ifdef __cplusplus
 }

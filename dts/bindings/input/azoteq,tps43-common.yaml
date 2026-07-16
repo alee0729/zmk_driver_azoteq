@@ -178,6 +178,23 @@ properties:
       If set, the trackpad is put to sleep when ZMK transitions to the IDLE
       activity state. If not set (default), only the SLEEP activity state puts
       the trackpad to sleep; IDLE leaves the trackpad active.
+      NOTE: a suspended trackpad stops sensing entirely and cannot wake itself
+      on touch - waking requires other keyboard activity. For touch-to-wake
+      idle power saving use idle-scan-rate-ms instead (mutually exclusive).
+
+  idle-scan-rate-ms:
+    type: int
+    required: false
+    description: |
+      Slow-scan idle mode. If set, when ZMK transitions to the IDLE activity
+      state the driver slows the chip's LP2 ALP scan rate (REPORT_RATE_LP2,
+      0x0582) to this value in milliseconds instead of suspending. The trackpad
+      keeps sensing and wakes itself on touch - the first touch registers
+      within about one scan period (<= ~0.5 s at 500). On the ACTIVE state the
+      normal LP2 rate is restored (report-rate-lp2 if set, else the firmware
+      default read back once at configure time). The SLEEP activity state still
+      fully suspends the trackpad. Requires enable-power-management. Mutually
+      exclusive with idle-sleep (compile-time error). Typical value: 500.
 
   single-tap:
     type: boolean
